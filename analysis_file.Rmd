@@ -1,0 +1,953 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Importing the libraries
+```{r}
+library(ggplot2)
+library(pals)
+library(knitr)
+library(cowplot)
+library(betareg)
+library(tidyverse)
+```
+
+Loading the data
+```{r}
+name_of_data_note <- 'load_the_data.Rmd'
+name_of_data_script <- 'load_the_data.R'
+```
+
+```{r message=FALSE, results='hide'}
+knit(name_of_data_note, tangle=TRUE)
+source(name_of_data_script)
+```
+```{r}
+output_dir=paste(getwd(),'/tables',sep='')
+if (!dir.exists(output_dir)) {dir.create(output_dir)}
+
+plots_dir=paste(getwd(),'/figures',sep='')
+if (!dir.exists(plots_dir)) {dir.create(plots_dir)}
+```
+
+```{r}
+# Add a variable that has the ARG normalized by 16s counts but times 1000
+semar_info_frame <- semar_info_frame %>% mutate(res_count_kbac_norm = res_count_bac_norm*1000)
+```
+
+
+```{r}
+#use matched clinical data
+clin_vars <- c('cl_R_AP','cl_R_FQ','cl_R_3GC','cl_R_AG','cl_R_MAR')
+
+clin_data_ecdc <- readxl::read_excel('data/ecdc_data.xlsx', sheet='matched') %>% 
+  dplyr::select(all_of(clin_vars), Country)
+
+semar_info_frame <- semar_info_frame %>%dplyr::select(!all_of(clin_vars)) %>%  left_join(clin_data_ecdc, by='Country')
+
+
+```
+
+Overview of the data
+
+## Total ARG abundance
+
+Plot both sequencing relative abundance. The sequencing data is normalized with the estimated 16S counts.
+
+```{r, fig.width=9, fig.height=4.5}
+cl_order <- order(semar_info_frame$res_count_bac_norm)
+cl_order_names <- semar_info_frame$Country[cl_order]
+
+ arg.bac.norm <- ggplot(semar_info_frame, aes(x = Country, y = res_count_kbac_norm,fill = Country, alpha = 0.5)) + 
+    geom_bar(stat="identity",colour="black")+ scale_fill_brewer(type='qual',palette=8)  + 
+    theme_minimal() + guides(fill = FALSE, alpha = FALSE) + theme(axis.text.x = element_text(angle = 270,hjust=0)) +
+    labs(y = "Relative Abundance", x = "",title="Illumina") 
+ 
+ arg.bac.norm$data$Country <- factor(arg.bac.norm$data$Country, levels = cl_order_names) # Comment this if order by country name
+
+
+print(arg.bac.norm)
+
+```
+Save the above figure
+```{r}
+ggsave("figures/arg_relative_abundance.svg", arg.bac.norm, height=6,width=11)
+```
+
+## ARG class distribution
+
+```{r}
+# Create a phylsoeq with arg classes from sequencing data
+ps_to_use <- ps_args_bac_norm
+taxGlomRank = "Class"
+ps_arg_class <- tax_glom(ps_to_use, taxrank = taxGlomRank)
+taxa_names(ps_arg_class) <- tax_table(ps_arg_class)[,1]
+
+# Normalize by total ARG abundance
+ps_arg_class_norm <- transform_sample_counts(ps_arg_class,function(x) x/sum(x))
+
+```
+
+```{r}
+ps_tmp <- ps_arg_class_norm 
+sample_names(ps_tmp) <- sample_data(ps_tmp)$Country
+write.table(data.frame(otu_table(ps_tmp)),'figures/illumina_arg_class_distribution.txt',sep='\t')
+
+```
+
+
+Create the relative abundance plot 
+```{r, fig.width=11, fig.height=4}
+# ---- Illumina data ----- #
+# Use only the 10 most abundant classes
+
+#Counts
+ps_arg_class_norm <- transform_sample_counts(ps_arg_class,function(x) x/1)
+
+
+ps_to_use <- ps_arg_class_norm
+num_species = 11
+top_names = names(sort(taxa_sums(ps_to_use), TRUE)[1:num_species])
+ps2=prune_taxa(top_names,ps_to_use)
+
+
+ps_to_use <- ps2
+
+# Create the figure
+
+#data prep
+df_otu_top_10 <- as.data.frame(as.matrix(ps_to_use@otu_table)) %>%
+  rownames_to_column()
+
+df_otu_top_10_long <-  df_otu_top_10 %>% pivot_longer(names_to = 'Sample', values_to = 'abundance', cols = starts_with('P'))
+
+
+top_10_sum <- as.data.frame(t(df_otu_top_10 %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE))))) %>%
+  rownames_to_column() %>%
+  left_join(semar_info_frame, by=c('rowname'='Sample')) %>%
+  mutate(Other=res_count_bac_norm-V1)
+
+top_10_other <- top_10_sum %>% select(Sample=rowname, 'abundance'=Other) %>%
+  mutate(rowname='Other')
+
+tot_abund_plot <- rbind(df_otu_top_10_long, top_10_other) %>%
+  left_join(semar_info_frame %>% select(Country, Sample), by='Sample') %>%
+  arrange(abundance) %>%
+  mutate(Class=factor(rowname, levels=c("Aminoglycoside","Beta-lactam", "Colistin", "Macrolide","Phenicol" ,
+                                        "Quinolone",      "Rifampicin", "Sulphonamide",   "Tetracycline",   "Trimethoprim","Other"))) %>% 
+  filter(!is.na(Class))
+
+#plot
+abundance_p2 <- ggplot(tot_abund_plot, aes(x = reorder(Country, abundance), y = abundance, fill = Class)) +
+  geom_bar(stat="identity",colour="black", linewidth=.1)+
+  scale_fill_brewer(type='qual',palette=8, name='Class')  +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 270,vjust=0.5, hjust=0),
+        legend.position = 'right') +
+  labs(y = "Relative Abundance", x = "Country",title="")
+
+
+print(abundance_p2)
+```
+
+
+Save the above figure
+```{r}
+ggsave("figures/fig 1_arg_class_distributions.png", abundance_p2, height=6,width=8)
+ggsave("figures/fig 1_arg_class_distributions.svg", abundance_p2, height=6,width=8)
+```
+
+# Predictions
+
+## Total ARGs
+
+### Predictions
+
+Loop over all predictors and the four response (clinical resistance to AP, FQ, 3GC and AG) variables. 
+
+So the predictors used here are:
+
+Isolates: "wwtp_R_AP","wwtp_R_FQ","wwtp_R_3GC","wwtp_R_AG", "wwtp_R_MAR"
+Illumina normalized total ARG count (disinfectants not included): "res_count_kbac_norm"
+
+Illumina normalized intI1: "intI1_count_bac_norm"
+
+```{r}
+prediction_frame <- data.frame()
+response_variables <- c("cl_R_AP","cl_R_FQ","cl_R_3GC","cl_R_AG")
+predict_frame_colnames <- c("AP_Rsquare","AP_pval","FQ_Rsquare","FQ_pval","3GC_Rsquare","3GC_pval","AG_Rsquare","AG_pval")
+
+
+num_response_variables = length(response_variables)
+illumina_total_arg <- c()
+
+
+predictors <- c("wwtp_R_AP","wwtp_R_FQ","wwtp_R_3GC","wwtp_R_AG","wwtp_R_MAR","res_count_kbac_norm","intI1_count_bac_norm")
+
+num_predictors <- length(predictors)
+
+for (pr in 1:num_predictors) {
+  j = 1
+  illumina_total_arg <- c()
+  for (i in 1:num_response_variables) {
+    tmp <- summary(betareg(paste(response_variables[i]," ~ ",predictors[pr]), data=semar_info_frame))
+    illumina_total_arg[j] <- tmp$pseudo.r.squared
+    j = j+1
+    illumina_total_arg[j] <- tmp$coefficients$mean[2,4]
+    j = j+1
+  }
+  prediction_frame <- rbind(prediction_frame,illumina_total_arg)
+  
+}
+colnames(prediction_frame) <- predict_frame_colnames
+rownames(prediction_frame) <- predictors
+prediction_frame_total <- prediction_frame
+print(prediction_frame)
+
+```
+
+
+## Corresponding ARGs
+
+Two functions that summarizes a given ARG class counts and merges it to a given data frame. 
+```{r}
+get_class_counts_sample=function(physeq,metaframe) {
+  # This function merge the counts by Sample names
+  tmp_otus <- otu_table(physeq)
+  tmp_res_count <- apply(tmp_otus,2,sum)
+  
+  tmp_res_count_frame <- data.frame(tmp_res_count)
+  tmp_res_count_frame <- tmp_res_count_frame %>% mutate(Sample = rownames(tmp_res_count_frame))
+  tmp_frame <- merge(metaframe, tmp_res_count_frame, by="Sample")
+ 
+  rownames(tmp_frame) <- tmp_frame$Sample
+  return(tmp_frame)
+  }
+
+get_class_counts_country=function(physeq,metaframe) {
+  # This function merge the counts by Country names
+  tmp_otus <- otu_table(physeq)
+  tmp_res_count <- apply(tmp_otus,2,sum)
+  
+  tmp_res_count_frame <- data.frame(tmp_res_count)
+  tmp_res_count_frame <- tmp_res_count_frame %>% mutate(Country = rownames(tmp_res_count_frame))
+  tmp_frame <- merge(metaframe, tmp_res_count_frame, by="Country")
+  
+  rownames(tmp_frame) <- tmp_frame$Country
+  return(tmp_frame)
+  }
+```
+
+
+### Illumina corresponding ARGs
+Load files containing names of ARGs that gives 3rg gen cephalosporin and AP resistance
+```{r}
+ceph_file <- 'data/ceph_args.txt'
+ap_file <- 'data/ap_args.txt'
+
+ceph_args_list <- read_delim(ceph_file,'\t')
+ap_args_list <- read_delim(ap_file,'\t')
+```
+
+Extract counts for repsective ARG class from the Illumina data
+```{r}
+ps_to_use <- ps_args_bac_norm
+sample_names(ps_to_use) <- sample_data(ps_to_use)$Country
+
+updated_info_frame <- data.frame(sample_data(ps_to_use))
+
+# Extract the AP resistance assays
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% ap_args_list$cl_90)
+
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(ap_res_count=tmp_res_count)
+
+# Extract the ceph resistance assays
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% ceph_args_list$cl_90)
+
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(ceph_res_count=tmp_res_count)
+
+# Extract AG resistance assays
+ps_args_beta = subset_taxa(ps_to_use , Class %in% "Aminoglycoside")
+
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(ag_res_count=tmp_res_count)
+
+# Extract quinolone resistance assays
+ps_args_beta = subset_taxa(ps_to_use , Class %in% "Quinolone")
+
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(quin_res_count=tmp_res_count)
+
+#saving for model runs
+tot_ab_class_args <- updated_info_frame
+```
+
+
+Create data frame for Illumina data vs clinical resistance, then generate the figure
+```{r}
+tmp_frame <- updated_info_frame
+
+AP <- tmp_frame %>% dplyr::select(ap_res_count, cl_R_AP)
+colnames(AP) <- c("wwtp","clinical")
+FQ <- tmp_frame %>% dplyr::select(quin_res_count, cl_R_FQ)
+colnames(FQ) <- c("wwtp","clinical")
+ceph <- tmp_frame %>% dplyr::select(ceph_res_count, cl_R_3GC)
+colnames(ceph) <- c("wwtp","clinical")
+AG <- tmp_frame %>% dplyr::select(ag_res_count, cl_R_AG)
+colnames(AG) <- c("wwtp","clinical")
+
+
+data <- rbind(AP, FQ, ceph, AG)
+data$group <- rep(c("AP", "FQ", "3rd gen. Ceph","AG"), c(nrow(AP), nrow(FQ), nrow(ceph),nrow(AG)))
+
+
+# Create the figure for Illumina total ARGs vs clinical resistance
+wwtp.clin.corr.illum <- ggplot(data, aes(x = wwtp, y = clinical, fill = group)) +
+  geom_point(pch=21, size=3)+
+  scale_fill_manual(values = c("#2c7c94","#a65852","#a6d0c8","#343c24","#c4aa23"))+
+  theme_classic()+labs(x="Wastewater resistance: Illumina corresponding ARGs", y="Clinical resistance",fill="AB type") #+ scale_x_log10()
+wwtp.clin.corr.illum
+
+```
+
+predictions
+
+
+```{r}
+
+prediction_frame <- prediction_frame_total
+old_names <- rownames(prediction_frame)
+response_variables <- c("cl_R_AP","cl_R_FQ","cl_R_3GC","cl_R_AG")
+predict_frame_colnames <- c("AP_Rsquare","AP_pval","FQ_Rsquare","FQ_pval","3GC_Rsquare","3GC_pval","AG_Rsquare","AG_pval")
+
+
+num_response_variables = length(response_variables)
+illumina_total_arg <- c()
+predictors <- c("ap_res_count","quin_res_count","ceph_res_count","ag_res_count")
+num_predictors <- length(predictors)
+
+for (pr in 1:num_predictors) {
+  j = 1
+  illumina_total_arg <- c()
+  for (i in 1:num_response_variables) {
+    tmp <- summary(betareg(paste(response_variables[i]," ~ ",predictors[pr]), data=updated_info_frame))
+    illumina_total_arg[j] <- tmp$pseudo.r.squared
+    j = j+1
+    illumina_total_arg[j] <- tmp$coefficients$mean[2,4]
+    j = j+1
+  }
+  prediction_frame <- rbind(prediction_frame,illumina_total_arg)
+  
+}
+
+new_row_names <- c(old_names,predictors)
+rownames(prediction_frame) <- new_row_names
+prediction_frame_corr <- prediction_frame
+print(prediction_frame)
+```
+
+# Top ten in Ecoli
+
+## Illumina data
+
+### Total top ten
+```{r}
+top_ten_unique <- c("sul2_clust1_c90",
+"aph(3__)-Ib_clust1_c90",
+"aph(6)-Id_clust1_c90",
+"tet(A)_clust1_c90",
+"blaTEM-115_clust1_c90",
+"sul1_clust1_c90",
+"aadA22_clust1_c90",
+"tet(B)_clust1_c90",
+"mph(A)_clust2_c90",
+"blaCTX-M-186_clust1_c90")
+```
+
+```{r}
+ps_to_use <- ps_args_bac_norm
+sample_names(ps_to_use) <- sample_data(ps_to_use)$Country
+
+updated_info_frame <- data.frame(sample_data(ps_to_use))
+
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% top_ten_unique)
+
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(top_ten_illum=tmp_res_count)
+```
+
+```{r, fig.width=7, fig.height=4}
+tmp_frame <- updated_info_frame
+
+AP <- tmp_frame %>% dplyr::select(top_ten_illum, cl_R_AP)
+colnames(AP) <- c("wwtp","clinical")
+FQ <- tmp_frame %>% dplyr::select(top_ten_illum, cl_R_FQ)
+colnames(FQ) <- c("wwtp","clinical")
+ceph <- tmp_frame %>% dplyr::select(top_ten_illum, cl_R_3GC)
+colnames(ceph) <- c("wwtp","clinical")
+AG <- tmp_frame %>% dplyr::select(top_ten_illum, cl_R_AG)
+colnames(AG) <- c("wwtp","clinical")
+
+
+data <- rbind(AP, FQ, ceph, AG)
+data$group <- rep(c("AP", "FQ", "3rd gen. Ceph","AG"), c(nrow(AP), nrow(FQ), nrow(ceph),nrow(AG)))
+
+
+# Create the figure for Illumina total ARGs vs clinical resistance
+wwtp.clin.top.illum <- ggplot(data, aes(x = wwtp, y = clinical, fill = group)) +
+  geom_point(pch=21, size=3)+
+  scale_fill_manual(values = c("#2c7c94","#a65852","#a6d0c8","#343c24","#c4aa23"))+
+  theme_classic()+labs(x="Wastewater resistance: top ten ARGs (Illumina)", y="Clinical resistance",fill="AB type") #+ scale_x_log10()
+wwtp.clin.top.illum
+
+```
+
+
+
+### Top ten corresponding ARG
+
+```{r}
+top_ten_AG <- c("aph(3__)-Ib_clust1_c90","aph(6)-Id_clust1_c90","aadA22_clust1_c90","aadA5_clust1_c90",
+                "aph(3_)-Ia_clust1_c90","aac(3)-IIc_clust1_c90","aadA2b_clust1_c90","aac(3)-IVa_clust1_c90","aph(4)-Ia_clust1_c90","aac(3)-VIa_clust1_c90"
+)
+
+top_ten_beta <- c("blaTEM-115_clust1_c90","blaCTX-M-186_clust1_c90","blaCTX-M-21_clust1_c90","blaOXA-534_clust1_c90","blaCMY-129_clust1_c90",
+                  "blaNDM-9_clust1_c90","blaOXA-514_clust1_c90","blaSHV-78_clust1_c90","blaHERA-5_clust1_c90","blaOXA-16_clust1_c90"
+)
+
+
+top_ten_FQ <- c("qnrS3_clust1_c90","qnrB65_clust1_c90","OqxA_clust1_c90","OqxB_clust1_c90","qepA1_clust1_c90",
+                "qnrS6_clust1_c90","qnrA3_clust1_c90","qnrD2_clust1_c90","qnrVC7_clust1_c90","qepA3_clust1_c90"
+)
+
+top_ten_AP <- c("blaTEM-115_clust1_c90","blaCTX-M-186_clust1_c90","blaCTX-M-21_clust1_c90","blaOXA-534_clust1_c90",
+                "blaCMY-129_clust1_c90","blaNDM-9_clust1_c90","blaOXA-514_clust1_c90","blaSHV-78_clust1_c90","blaHERA-5_clust1_c90","blaOXA-16_clust1_c90"
+)
+
+top_ten_ceph <- c("blaCTX-M-186_clust1_c90","blaCTX-M-21_clust1_c90","blaCMY-129_clust1_c90","blaNDM-9_clust1_c90",
+                  "blaSHV-78_clust1_c90","blaOXA-16_clust1_c90","blaKPC-9_clust1_c90","blaDHA-17_clust1_c90","blaKPC-12_clust1_c90","blaTEM-115_clust1_c90"
+)
+```
+
+
+```{r}
+ps_to_use <- ps_args_bac_norm
+
+sample_names(ps_to_use) <- sample_data(ps_to_use)$Country
+
+updated_info_frame <- data.frame(sample_data(ps_to_use))
+
+# AP
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% top_ten_AP)
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(ap_res_count=tmp_res_count)
+
+# 3rd gen cephalosporins
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% top_ten_ceph)
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(ceph_res_count=tmp_res_count)
+
+# AG
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% top_ten_AG)
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(ag_res_count=tmp_res_count)
+
+# FQ
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% top_ten_FQ)
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(quin_res_count=tmp_res_count)
+
+# Total top ten
+ps_args_beta = subset_taxa(ps_to_use , cl_90 %in% top_ten_unique)
+updated_info_frame <- get_class_counts_country(ps_args_beta,updated_info_frame)
+updated_info_frame <- updated_info_frame %>% dplyr::rename(top_ten_illum=tmp_res_count)
+
+#Top ten ARGs
+tmp_info_frame <- updated_info_frame %>% dplyr::rename(top_ten_ap = ap_res_count, top_ten_ceph = ceph_res_count, top_ten_FQ=quin_res_count, top_ten_ag=ag_res_count, top_ten_args = top_ten_illum)
+```
+
+Plot the data
+```{r}
+tmp_frame <- updated_info_frame
+
+AP <- tmp_frame %>% dplyr::select(ap_res_count, cl_R_AP)
+colnames(AP) <- c("wwtp","clinical")
+FQ <- tmp_frame %>% dplyr::select(quin_res_count, cl_R_FQ)
+colnames(FQ) <- c("wwtp","clinical")
+ceph <- tmp_frame %>% dplyr::select(ceph_res_count, cl_R_3GC)
+colnames(ceph) <- c("wwtp","clinical")
+AG <- tmp_frame %>% dplyr::select(ag_res_count, cl_R_AG)
+colnames(AG) <- c("wwtp","clinical")
+
+data <- rbind(AP, FQ, ceph, AG)
+data$group <- rep(c("AP", "FQ", "3GC","AG"), c(nrow(AP), nrow(FQ), nrow(ceph),nrow(AG)))
+```
+
+
+```{r}
+wwtp.top.sep.plot <- ggplot(data, aes(x = wwtp, y = clinical, fill = group)) +
+  geom_point(pch=21, size=3)+
+  scale_fill_manual(values = c("#2c7c94","#a65852","#a6d0c8","#343c24"))+
+  theme_classic()+labs(x="Relative abundance of top 10 ARGs (respective class)", y="Resistance rates in clinical isolates",fill="AB type")+
+  theme(legend.title = element_blank())#+scale_x_log10()
+wwtp.top.sep.plot
+```
+
+```{r}
+
+#sewage clinical plot
+tmp_frame <- updated_info_frame
+
+AP <- tmp_frame %>% dplyr::select(wwtp_R_AP, cl_R_AP)
+colnames(AP) <- c("wwtp","clinical")
+FQ <- tmp_frame %>% dplyr::select(wwtp_R_FQ, cl_R_FQ)
+colnames(FQ) <- c("wwtp","clinical")
+ceph <- tmp_frame %>% dplyr::select(wwtp_R_3GC, cl_R_3GC)
+colnames(ceph) <- c("wwtp","clinical")
+AG <- tmp_frame %>% dplyr::select(wwtp_R_AG, cl_R_AG)
+colnames(AG) <- c("wwtp","clinical")
+
+data <- rbind(AP, FQ, ceph, AG)
+data$group <- rep(c("AP", "FQ", "3GC","AG"), c(nrow(AP), nrow(FQ), nrow(ceph),nrow(AG)))
+
+wwtp.sew.clin <- ggplot(data, aes(x = wwtp, y = clinical, fill = group)) +
+  geom_point(pch=21, size=3)+
+  scale_fill_manual(values = c("#2c7c94","#a65852","#a6d0c8","#343c24"))+
+  theme_classic()+labs(x="Resistance rates in sewage isolates", y="Resistance rates in clinical isolates",fill="AB type")+
+  theme(legend.title = element_blank())#+scale_x_log10()
+wwtp.sew.clin
+
+
+```
+
+```{r}
+fig2 <- plot_grid(wwtp.sew.clin,wwtp.top.sep.plot, nrow=1, ncol=2,labels="AUTO")
+fig2
+```
+```{r}
+ggsave("figures/figure 2_pheno_geno.svg", fig2, height=4,width=9)
+ggsave("figures/figure 2_pheno_geno.png", fig2, height=4,width=9)
+```
+
+
+Getting the R squared values from the prediction models
+```{r}
+#prepping the df
+semar_info_df <- cbind(semar_info_frame,
+
+                       tot_ab_class_args[,26:29] %>% rename( "ap_res_count_cls_args"=ap_res_count,
+                                                             "ceph_res_count_cls_args"=ceph_res_count,
+                                                             "ag_res_count_cls_args"=ag_res_count,
+                                                             "quin_res_count_cls_args"=quin_res_count),
+
+                       tmp_info_frame[, 26:30])
+```
+
+#Single independent variable models
+##generalizing var names for single ind variable models
+```{r}
+var_table <- tibble(
+  dep = c("cl_R_AP", "cl_R_FQ", "cl_R_3GC", "cl_R_AG",
+          "cl_R_AP", "cl_R_FQ", "cl_R_3GC", "cl_R_AG",
+          "cl_R_AP", "cl_R_FQ", "cl_R_3GC", "cl_R_AG",
+          "cl_R_AP", "cl_R_FQ", "cl_R_3GC", "cl_R_AG",
+          "cl_R_AP", "cl_R_3GC", "cl_R_AG", "cl_R_FQ",
+          "cl_R_AP", "cl_R_3GC", "cl_R_AG", "cl_R_FQ",
+          "cl_R_AP", "cl_R_3GC", "cl_R_AG", "cl_R_FQ"),
+
+  ind = c("wwtp_R_AP", "wwtp_R_FQ", "wwtp_R_3GC", "wwtp_R_AG",
+          "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR",
+          "res_count_kbac_norm", "res_count_kbac_norm",
+          "res_count_kbac_norm", "res_count_kbac_norm",
+          "intI1_count_bac_norm", "intI1_count_bac_norm",
+          "intI1_count_bac_norm", "intI1_count_bac_norm",
+          "ap_res_count_cls_args", "ceph_res_count_cls_args",
+          "ag_res_count_cls_args", "quin_res_count_cls_args",
+          "top_ten_ap", "top_ten_ceph", "top_ten_ag", "top_ten_FQ",
+          "top_ten_args", "top_ten_args", "top_ten_args", "top_ten_args")
+)%>%
+  mutate(id=paste0(dep,'_vs_',ind))
+```
+
+```{r}
+var_mod_outputs <-  list()
+mod_outputs <- list()
+
+for (id in unique(var_table$id)) {
+
+  dep=var_table$dep[var_table$id==id]
+  ind=var_table$ind[var_table$id==id]
+
+
+  for(i in 1:10) {
+    train <- semar_info_df[-i,]
+    test <- semar_info_df[i,]
+
+    ov_model_r_sq <- summary(betareg(paste0(dep, '~', ind), data=semar_info_df))$pseudo.r.squared
+
+    m1 <- betareg(paste0(dep, '~', ind), data=train)
+    pred1 <- predict(m1, test)
+    actual_val <- test[[paste0(dep)]]
+
+    r_squared <- summary(m1)$pseudo.r.squared
+    ae <- abs(pred1 - test[[paste0(dep)]])
+    sq_er <- (pred1 - test[[paste0(dep)]])^2
+
+
+    mod_outputs[[i]]= tibble(i, actual_val, pred1, ov_model_r_sq, loocv_r_sq = r_squared, ae, sq_er)
+  }
+  mod_outputs_h1 <- do.call('rbind', mod_outputs) %>%
+    mutate(loocv_r_squared_mean= mean(loocv_r_sq),
+           mae= mean(ae),
+           mse=mean(sq_er),
+           rmse=sqrt(mse))
+
+  var_mod_outputs[[id]]= mod_outputs_h1 %>% mutate(id=id)
+
+}
+
+mod_outputs_table <- do.call('rbind', var_mod_outputs)
+```
+
+```{r}
+#Adjusted r squared
+mod_outputs_table_adjusted <- mod_outputs_table %>%
+  mutate(all_n=10,
+         looc_n=9,
+         dep_vars=1,
+         adj_ov_rsq=1-(((all_n-1)/(all_n-1-dep_vars))*(1-ov_model_r_sq )),
+         adj_looc_rsq=1-(((looc_n-1)/(looc_n-1-dep_vars))*(1-loocv_r_sq )))
+
+write.csv(mod_outputs_table_adjusted, 'tables/reg_results_indiv_models.csv')
+```
+
+
+#Multiple independent variable models
+
+##generalizing var names for multiple ind variable models
+
+```{r}
+var_table_comb <- tibble(
+  dep = c("cl_R_AP", "cl_R_FQ", "cl_R_3GC", "cl_R_AG",
+          "cl_R_AP", "cl_R_FQ", "cl_R_3GC", "cl_R_AG",
+          "cl_R_AP", "cl_R_3GC", "cl_R_AG", "cl_R_FQ",
+          "cl_R_AP", "cl_R_3GC", "cl_R_AG", "cl_R_FQ",
+          "cl_R_AP", "cl_R_3GC", "cl_R_AG", "cl_R_FQ",
+          "cl_R_AP", "cl_R_3GC", "cl_R_AG", "cl_R_FQ",
+          "cl_R_AP", "cl_R_FQ", "cl_R_3GC", "cl_R_AG"),
+
+  ind1 = c("intI1_count_bac_norm", "intI1_count_bac_norm", "intI1_count_bac_norm", "intI1_count_bac_norm",
+           "intI1_count_bac_norm", "intI1_count_bac_norm", "intI1_count_bac_norm", "intI1_count_bac_norm",
+           "top_ten_args", "top_ten_args", "top_ten_args", "top_ten_args",
+           "top_ten_args", "top_ten_args", "top_ten_args", "top_ten_args",
+           "top_ten_ap", "top_ten_ceph", "top_ten_ag", "top_ten_FQ",
+           "top_ten_ap", "top_ten_ceph", "top_ten_ag", "top_ten_FQ",
+           "res_count_kbac_norm", "res_count_kbac_norm", "res_count_kbac_norm", "res_count_kbac_norm"),
+
+  ind2 = c("wwtp_R_AP", "wwtp_R_FQ", "wwtp_R_3GC", "wwtp_R_AG",
+           "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR",
+           "wwtp_R_AP", "wwtp_R_3GC", "wwtp_R_AG", "wwtp_R_FQ",
+           "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR",
+           "wwtp_R_AP", "wwtp_R_3GC", "wwtp_R_AG", "wwtp_R_FQ",
+           "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR", "wwtp_R_MAR",
+           "wwtp_R_AP", "wwtp_R_FQ", "wwtp_R_3GC", "wwtp_R_AG")
+)%>%
+  mutate(id=paste0(dep,'_vs_',ind1,'+',ind2))
+
+```
+
+Model outputs from leave one out cross validation values (LOOCV)
+```{r}
+var_mod_outputs_comb <-  list()
+mod_outputs_comb <- list()
+
+for (id in unique(var_table_comb$id)) {
+
+  dep=var_table_comb$dep[var_table_comb$id==id]
+  ind1=var_table_comb$ind1[var_table_comb$id==id]
+  ind2=var_table_comb$ind2[var_table_comb$id==id]
+
+
+  for(i in 1:10) {
+    train <- semar_info_df[-i,]
+    test <- semar_info_df[i,]
+
+    ov_model_r_sq <- summary(betareg(paste0(dep, '~', ind1, '+', ind2), data=semar_info_df))$pseudo.r.squared
+
+    m1 <- betareg(paste0(dep, '~', ind1, '+', ind2), data=train)
+    pred1 <- predict(m1, test)
+    actual_val <- test[[paste0(dep)]]
+
+    r_squared <- summary(m1)$pseudo.r.squared
+    ae <- abs(pred1 - test[[paste0(dep)]])
+    sq_er <- (pred1 - test[[paste0(dep)]])^2
+
+
+    mod_outputs_comb[[i]]= tibble(i, actual_val, pred1, ov_model_r_sq, loocv_r_sq = r_squared, ae, sq_er)
+  }
+  mod_outputs_h2 <- do.call('rbind', mod_outputs_comb) %>%
+    mutate(loocv_r_squared_mean= mean(loocv_r_sq),
+           mae= mean(ae),
+           mse=mean(sq_er),
+           rmse=sqrt(mse))
+
+  var_mod_outputs_comb[[id]]= mod_outputs_h2 %>% mutate(id=id)
+
+}
+
+mod_outputs_table_comb <- do.call('rbind', var_mod_outputs_comb)
+
+mod_outputs_table_comb_adjusted <- mod_outputs_table_comb %>%
+  mutate(all_n=10,
+         looc_n=9,
+         dep_vars=2,
+         adj_ov_rsq=1-(((all_n-1)/(all_n-1-dep_vars))*(1-ov_model_r_sq )),
+         adj_looc_rsq=1-(((looc_n-1)/(looc_n-1-dep_vars))*(1-loocv_r_sq )))
+
+
+
+write.csv(mod_outputs_table_comb_adjusted, 'tables/reg_results_multiple_models.csv')
+
+```
+
+Putting all the model values in a table
+
+```{r}
+##adjusted R squared values
+manuscript_table_format <- readxl::read_excel('name_scheme_manuscript.xlsx', sheet = 'man_table')
+
+pred_results_adj <- rbind(mod_outputs_table_adjusted,mod_outputs_table_comb_adjusted)
+
+manu_table <- pred_results_adj %>% select("id", "dep_vars" ,  "adj_ov_rsq") %>%
+  mutate(id1=str_split_i(id,'_vs_',1),
+         deps=str_split_i(id,'_vs_',2)) %>%
+  distinct() %>%
+  left_join(manuscript_table_format, by='deps') %>%
+  select(-id, -deps,-dep_vars, -table_position) %>%
+  pivot_wider(values_from = 'adj_ov_rsq', names_from = 'id1' )%>%
+  left_join(manuscript_table_format %>% distinct(clean_tag, table_position), by='clean_tag') %>%
+  arrange(table_position)
+
+write.csv(manu_table, 'tables/s1_adj_r_sq_data.csv')
+
+```
+
+
+```{r}
+#unadjusted R squared values
+manu_table_unadjusted <- pred_results_adj %>% select("id", "dep_vars" ,  "ov_model_r_sq") %>%
+  mutate(id1=str_split_i(id,'_vs_',1),
+         deps=str_split_i(id,'_vs_',2)) %>%
+  distinct() %>%
+  left_join(manuscript_table_format, by='deps') %>%
+  select(-id, -deps,-dep_vars, -table_position) %>%
+  pivot_wider(values_from = 'ov_model_r_sq', names_from = 'id1' )%>%
+  left_join(manuscript_table_format %>% distinct(clean_tag, table_position), by='clean_tag') %>%
+  arrange(table_position)
+
+write.csv(manu_table_unadjusted, 'tables/table1_unadjusted_adj_r_sq_data.csv')
+
+```
+
+
+```{r}
+pred_results <- pred_results_adj %>%
+  mutate(ape=ae*100/actual_val,
+         ape2=log(pred1/actual_val)) %>%
+  group_by(id) %>%
+  mutate(mape=mean(ape),
+         sd_mape=sd(ape),
+         wape=sum(ae)/sum(actual_val))
+
+write.csv(pred_results, 'prediction_results.csv')
+```
+
+
+#Preparing the mean absolute percentage error (MAPE) table
+```{r}
+
+mape_table <- pred_results %>% select(id, mape) %>% distinct() %>%
+  mutate(dep=str_split_i(id, '_v', 1),
+         deps=str_split_i(id, '_vs_', 2)) %>%
+  left_join(manuscript_table_format, by=c('deps')) %>%
+  ungroup() %>%
+  select(-id, -deps, -table_position) %>%
+  pivot_wider(values_from = 'mape', names_from = 'dep' )%>%
+  left_join(manuscript_table_format %>% distinct(clean_tag, table_position), by='clean_tag') %>%
+  arrange(table_position)
+
+write.csv(mape_table, 'tables/mape_results.csv')
+```
+
+
+#Plotting the prediction results from the leave one out cross validation
+```{r}
+c_names=tibble(country=semar_info_df$Country, i=1:10)
+
+pred_labs <- readxl::read_excel('data/name_scheme_manuscript.xlsx')
+
+pred_results_p <- pred_results%>%
+  mutate(label=str_split_i(id, 'vs_', 2),
+         stat_label1 = c(paste0("~R^{2} == ", round(ov_model_r_sq,2))),
+         stat_label2 =  paste0("MAPE == ", round(mape,1))) %>%
+  left_join(pred_labs, by=c('id'='names')) %>%
+  left_join(c_names, by='i')
+
+
+ap_plt_data <- pred_results_p%>% filter(grepl('AP', id)) %>%
+  mutate(stat_label1=ifelse(i==10, stat_label1, ''),
+         stat_label2=ifelse(i==10, stat_label2, ''))      #i is the least on actual val
+
+fq_plt_data <- pred_results_p%>% filter(grepl('FQ', id)) %>%
+  mutate(stat_label1=ifelse(i==8, stat_label1, ''),
+         stat_label2=ifelse(i==8, stat_label2, ''))      #i is the least on actual val
+
+gc_plt_data <- pred_results_p%>% filter(grepl('3GC', id))%>%
+  mutate(stat_label1=ifelse(i==8, stat_label1, ''),
+         stat_label2=ifelse(i==8, stat_label2, ''))      #i is the least on actual val
+
+ag_plt_data <- pred_results_p%>% filter(grepl('AG', id))%>%
+  mutate(stat_label1=ifelse(i==3, stat_label1, ''),
+         stat_label2=ifelse(i==3, stat_label2, ''))      #i is the least on actual val
+
+```
+
+
+```{r}
+#aminopenicillins
+ap_plot <- ggplot(ap_plt_data, aes(x=reorder(country, actual_val)))+
+  geom_point(aes(y=pred1, color='blue'))+
+  geom_point(aes(y=actual_val, color='chocolate'))+
+  geom_text(aes(y=.80, label= stat_label1),parse=T, hjust=0, size=3)+
+  geom_text(aes(y=.70, label= (stat_label2)),parse=T, hjust=0, size=3)+
+  scale_color_manual(name='',values=c('blue'='blue', 'chocolate'='chocolate1'), labels=c('chocolate'='Clinical resistance','blue'='Predicted clinical resistance'))+
+  labs(y='Resistance rates in clinical isolates', x='Country')+
+  facet_wrap(~rep,
+             labeller = labeller(rep = function(x) gsub(" & ", "\n&\n ", x)))+
+  theme_bw()+
+  theme(axis.text.x = element_text(size=7,angle=90,hjust=1,vjust=0),axis.text.y = element_text(size=7),axis.title.y = element_text(size=9),
+        axis.title.x = element_text(size=9),legend.position = 'bottom',
+        plot.title = element_text(hjust = 0.5, face='bold', size=9),
+        strip.text = element_text(size=7),legend.text=element_text(size=8),
+        panel.grid = element_blank(),
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.25))
+
+ggsave('figures/ap_plot.png',ap_plot, height = 8, width = 8, units = 'in', dpi = 300 )
+ggsave('figures/ap_plot.svg',ap_plot, height = 8, width = 11, units = 'in', dpi = 300 )
+```
+
+
+```{r}
+#fluoroquinolones
+fq_plot <- ggplot(fq_plt_data, aes(x=reorder(country, actual_val)))+
+  geom_point(aes(y=pred1, color='blue'))+
+  geom_point(aes(y=actual_val, color='chocolate'))+
+  geom_text(aes(y=.75, label= stat_label1),parse=T, hjust=0, size=3)+
+  geom_text(aes(y=.65, label= (stat_label2)),parse=T, hjust=0, size=3)+
+  scale_color_manual(name='',values=c('blue'='blue', 'chocolate'='chocolate1'), labels=c('chocolate'='Clinical resistance','blue'='Predicted clinical resistance'))+
+  labs(y='Resistance rates in clinical isolates', x='Country')+
+  facet_wrap(~rep,
+             labeller = labeller(rep = function(x) gsub(" & ", "\n&\n ", x)))+
+  theme_bw()+
+  theme(axis.text.x = element_text(size=7,angle=90,hjust=1,vjust=0.5),axis.text.y = element_text(size=7),axis.title.y = element_text(size=9),
+        axis.title.x = element_text(size=9),legend.position = 'bottom',
+        plot.title = element_text(hjust = 0.5, face='bold', size=9),#legend.key.size = unit(0.7, "cm"),#legend.spacing.x = unit(0.5,"cm"),
+        strip.text = element_text(size=7),legend.text=element_text(size=8),#legend.title = element_blank(),
+        panel.grid = element_blank(),
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.25))
+
+
+ggsave('figures/fq_plot.png',fq_plot, height = 8, width = 8, units = 'in', dpi = 300 )
+```
+
+
+```{r}
+#third generation cephalosporins
+gc_plot <- ggplot(gc_plt_data, aes(x=reorder(country, actual_val)))+
+  geom_point(aes(y=pred1, color='blue'))+
+  geom_point(aes(y=actual_val, color='chocolate'))+
+  geom_text(aes(y=.65, label= stat_label1),parse=T, hjust=0, size=3)+
+  geom_text(aes(y=.55, label= (stat_label2)),parse=T, hjust=0, size=3)+
+  scale_color_manual(name='',values=c('blue'='blue', 'chocolate'='chocolate1'), labels=c('chocolate'='Clinical resistance','blue'='Predicted clinical resistance'))+
+  labs(y='Resistance rates in clinical isolates', x='Country')+
+  facet_wrap(~rep,
+             labeller = labeller(rep = function(x) gsub(" & ", "\n&\n ", x)))+
+  theme_bw()+
+  theme(axis.text.x = element_text(size=7,angle=90,hjust=1,vjust=0.5),axis.text.y = element_text(size=7),axis.title.y = element_text(size=9),
+        axis.title.x = element_text(size=9),legend.position = 'bottom',
+        plot.title = element_text(hjust = 0.5, face='bold', size=9),#legend.key.size = unit(0.7, "cm"),#legend.spacing.x = unit(0.5,"cm"),
+        strip.text = element_text(size=7),legend.text=element_text(size=8),#legend.title = element_blank(),
+        panel.grid = element_blank(),
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.25))
+
+ggsave('figures/gc_plot.png',gc_plot, height = 8, width = 8, units = 'in', dpi = 300 )
+```
+
+
+```{r}
+#Aminoglycosides
+ag_plot <- ggplot(ag_plt_data, aes(x=reorder(country, actual_val)))+
+  geom_point(aes(y=pred1, color='blue'))+
+  geom_point(aes(y=actual_val, color='chocolate'))+
+  geom_text(aes(y=.55, label= stat_label1),parse=T, hjust=0, size=3)+
+  geom_text(aes(y=.45, label= (stat_label2)),parse=T, hjust=0, size=3)+
+  scale_color_manual(name='',values=c('blue'='blue', 'chocolate'='chocolate1'), labels=c('chocolate'='Clinical resistance','blue'='Predicted clinical resistance'))+
+  labs(y='Resistance rates in clinical isolates', x='Country')+
+  facet_wrap(~rep,
+             labeller = labeller(rep = function(x) gsub(" & ", "\n&\n ", x)))+
+  theme_bw()+
+  theme(axis.text.x = element_text(size=7,angle=90,hjust=1,vjust=0.5),axis.text.y = element_text(size=7),axis.title.y = element_text(size=9),
+        axis.title.x = element_text(size=9),legend.position = 'bottom',
+        plot.title = element_text(hjust = 0.5, face='bold', size=9),
+        strip.text = element_text(size=7),legend.text=element_text(size=8),
+        panel.grid = element_blank(),
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.25))
+
+ggsave('figures/ag_plot.png',ag_plot, height = 8, width = 8, units = 'in', dpi = 300 )
+```
+
+
+Plotting the ratios of top 10 ARGs
+```{r}
+
+ratio_plot_data <- semar_info_df %>% mutate(AP= top_ten_ap/ap_res_count_cls_args,
+                         AG=top_ten_ag/ag_res_count_cls_args,
+                         FQ=top_ten_FQ/quin_res_count_cls_args,
+                         `3GC`=top_ten_ceph/ceph_res_count_cls_args) %>%
+  dplyr::select(AP,FQ,AG,`3GC`) %>%
+  pivot_longer(names_to = 'class', values_to = 'vals', cols=c(AP,FQ,AG,`3GC`))
+
+
+ratio_plt <- ggplot(ratio_plot_data, aes(x = reorder(class,vals), y = vals)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.6) +
+  labs(x = "Antibiotic Class", y = "Ratio of Top 10 E. coli ARGs to Total ARGs for respective antibiotic class") +
+  theme_bw()+
+  theme(axis.text.x = element_text(size=7,angle=0),axis.text.y = element_text(size=7),axis.title.y = element_text(size=9),
+        axis.title.x = element_text(size=9),legend.position = 'bottom',
+        plot.title = element_text(hjust = 0.5, face='bold', size=9),#legend.key.size = unit(0.7, "cm"),#legend.spacing.x = unit(0.5,"cm"),
+        strip.text = element_text(size=7),legend.text=element_text(size=8),#legend.title = element_blank(),
+        panel.grid.major = element_line(),
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.25))
+
+ggsave('figures/s1_ratio_dist_plot.png',ratio_plt, height = 8, width = 8, units = 'in', dpi = 300 )
+
+```
+
+
+
+
